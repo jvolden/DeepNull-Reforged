@@ -21,7 +21,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.neoforged.fml.ModList;
 import net.neoforged.neoforge.capabilities.Capabilities;
 import net.neoforged.neoforge.capabilities.RegisterCapabilitiesEvent;
-import net.neoforged.neoforge.items.IItemHandler;
 import net.neoforged.neoforge.items.IItemHandlerModifiable;
 import net.neoforged.neoforge.server.ServerLifecycleHooks;
 import net.neoforged.neoforge.transfer.ResourceHandler;
@@ -86,12 +85,7 @@ public final class ModCapabilities {
         event.registerBlockEntity(
                 Capabilities.Item.BLOCK,
                 ModBlockEntities.NULL_WORKBENCH.get(),
-                (workbench, side) -> {
-                    IItemHandler automation = workbench.getAutomationHandler();
-                    return automation instanceof IItemHandlerModifiable modifiable
-                            ? TransferCapabilityAdapters.item(modifiable)
-                            : null;
-                }
+                (workbench, side) -> workbench.getAutomationHandler()
         );
         event.registerBlockEntity(
                 Capabilities.Fluid.BLOCK,
@@ -222,10 +216,7 @@ public final class ModCapabilities {
 
     private static @Nullable ResourceHandler<ItemResource> createNullWorkbenchHandler(Level level, BlockPos pos, BlockState state, @Nullable BlockEntity blockEntity, @Nullable Direction side) {
         if (blockEntity instanceof NullWorkbenchBlockEntity workbench) {
-            IItemHandler automation = workbench.getAutomationHandler();
-            return automation instanceof IItemHandlerModifiable modifiable
-                    ? TransferCapabilityAdapters.item(modifiable)
-                    : null;
+            return workbench.getAutomationHandler();
         }
         BlockPos mainPos = resolveNullWorkbenchMainPos(pos, state);
         if (mainPos == null) {
