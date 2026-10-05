@@ -11,19 +11,24 @@ import dev.deepdaddyttv.deepnullreforged.recipe.NullWorkbenchRecipes;
 import dev.deepdaddyttv.deepnullreforged.registry.ModBlockEntities;
 import dev.deepdaddyttv.deepnullreforged.registry.ModItems;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.NonNullList;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket;
 import net.minecraft.world.Containers;
+import net.minecraft.world.ItemStackWithSlot;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.storage.ValueInput;
 import net.minecraft.world.level.storage.ValueOutput;
-import net.neoforged.neoforge.items.IItemHandler;
+import dev.deepdaddyttv.deepnullreforged.capability.TransferCapabilityAdapters;
 import net.neoforged.neoforge.items.IItemHandlerModifiable;
-import net.neoforged.neoforge.items.ItemStackHandler;
+import net.neoforged.neoforge.transfer.ResourceHandler;
+import net.neoforged.neoforge.transfer.item.ItemResource;
+import net.neoforged.neoforge.transfer.item.ItemStacksResourceHandler;
+import net.neoforged.neoforge.transfer.transaction.TransactionContext;
 import org.jetbrains.annotations.Nullable;
 
 public class NullWorkbenchBlockEntity extends BlockEntity {
@@ -43,16 +48,43 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
     private static final String SYNC_PROGRESS_TAG = "SyncProgress";
     private static final String SYNC_ACTION_TAG = "SyncAction";
 
-    private final ItemStackHandler items = new ItemStackHandler(10) {
-        @Override
-        public void deserialize(ValueInput input) {
-            setSize(10);
-            super.deserialize(input);
-            onLoad();
+    private final WorkbenchItemStorage items = new WorkbenchItemStorage();
+    private final IItemHandlerModifiable itemHandlerView = new LegacyItemHandlerView();
+
+    /**
+     * Backed by {@link ItemStacksResourceHandler} rather than the deprecated {@code ItemStackHandler}, but
+     * {@link #serialize}/{@link #deserialize} keep writing the original {@code Items}/{@code Size} NBT shape so
+     * existing saved workbenches keep loading correctly.
+     */
+    private final class WorkbenchItemStorage extends ItemStacksResourceHandler {
+        private WorkbenchItemStorage() {
+            super(10);
         }
 
         @Override
-        protected void onContentsChanged(int slot) {
+        public void serialize(ValueOutput output) {
+            ValueOutput.TypedOutputList<ItemStackWithSlot> itemList = output.list("Items", ItemStackWithSlot.CODEC);
+            for (int i = 0; i < stacks.size(); i++) {
+                ItemStack stack = stacks.get(i);
+                if (!stack.isEmpty()) {
+                    itemList.add(new ItemStackWithSlot(i, stack));
+                }
+            }
+            output.putInt("Size", stacks.size());
+        }
+
+        @Override
+        public void deserialize(ValueInput input) {
+            setStacks(NonNullList.withSize(input.getIntOr("Size", stacks.size()), ItemStack.EMPTY));
+            input.listOrEmpty("Items", ItemStackWithSlot.CODEC).forEach(slot -> {
+                if (slot.isValidInContainer(stacks.size())) {
+                    stacks.set(slot.slot(), slot.stack());
+                }
+            });
+        }
+
+        @Override
+        protected void onContentsChanged(int index, ItemStack previousContents) {
             craftProgress = 0;
             syncProgress = 0;
             syncAction = SyncAction.NONE;
@@ -60,7 +92,7 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
         }
 
         @Override
-        public boolean isItemValid(int slot, ItemStack stack) {
+        public boolean isValid(int slot, ItemResource resource) {
             if (slot >= INPUT_SLOT_START && slot < INPUT_SLOT_START + INPUT_SLOT_COUNT) {
                 return true;
             }
@@ -68,26 +100,38 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
                 return false;
             }
             if (slot == NULL_SLOT) {
-                return stack.getItem() instanceof DeepNullItem;
+                return resource.getItem() instanceof DeepNullItem;
             }
             if (slot == SYNCHRONIZER_SLOT) {
-                return stack.is(ModItems.SYNCHRONIZER.get());
+                return resource.is(ModItems.SYNCHRONIZER.get());
             }
             if (slot == STYLE_MODIFIER_SLOT) {
-                return StyleGlassVariant.isSupportedModifier(stack);
+                return StyleGlassVariant.isSupportedModifier(resource.toStack(1));
             }
             if (slot == SYNC_NULL_OUTPUT_SLOT || slot == SYNC_SYNCHRONIZER_OUTPUT_SLOT) {
                 return false;
             }
             return false;
         }
-    };
+
+        public ItemStack getStackInSlot(int slot) {
+            return stacks.get(slot);
+        }
+
+        public void setStackInSlot(int slot, ItemStack stack) {
+            set(slot, ItemResource.of(stack), stack.getCount());
+        }
+
+        public int getSlots() {
+            return size();
+        }
+    }
 
     private int craftProgress;
     private int craftDuration = CRAFT_DURATION;
     private int syncProgress;
     private SyncAction syncAction = SyncAction.NONE;
-    private final IItemHandler automationHandler = new AutomationItemHandler();
+    private final ResourceHandler<ItemResource> automationHandler = new AutomationItemHandler();
 
     public NullWorkbenchBlockEntity(BlockPos pos, BlockState blockState) {
         super(ModBlockEntities.NULL_WORKBENCH.get(), pos, blockState);
@@ -105,11 +149,15 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
         }
     }
 
-    public ItemStackHandler getItemHandler() {
-        return items;
+    /**
+     * Bridges the new-API {@link #items} storage back to {@link IItemHandlerModifiable} for consumers that still
+     * need it (menu slots via {@code SlotItemHandler}, JEI transfer support, gametests).
+     */
+    public IItemHandlerModifiable getItemHandler() {
+        return itemHandlerView;
     }
 
-    public IItemHandler getAutomationHandler() {
+    public ResourceHandler<ItemResource> getAutomationHandler() {
         return automationHandler;
     }
 
@@ -478,6 +526,47 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
         return true;
     }
 
+    /**
+     * Old-API {@link IItemHandlerModifiable} view over {@link #items}, for the menu's {@code SlotItemHandler}
+     * slots, JEI transfer support, and gametests that haven't moved off {@code IItemHandler} yet.
+     */
+    private final class LegacyItemHandlerView implements IItemHandlerModifiable {
+        @Override
+        public int getSlots() {
+            return items.getSlots();
+        }
+
+        @Override
+        public ItemStack getStackInSlot(int slot) {
+            return items.getStackInSlot(slot);
+        }
+
+        @Override
+        public void setStackInSlot(int slot, ItemStack stack) {
+            items.setStackInSlot(slot, stack);
+        }
+
+        @Override
+        public ItemStack insertItem(int slot, ItemStack stack, boolean simulate) {
+            return TransferCapabilityAdapters.insertItemViaHandler(items, slot, stack, simulate);
+        }
+
+        @Override
+        public ItemStack extractItem(int slot, int amount, boolean simulate) {
+            return TransferCapabilityAdapters.extractItemViaHandler(items, slot, amount, simulate);
+        }
+
+        @Override
+        public int getSlotLimit(int slot) {
+            return items.getCapacityAsInt(slot, ItemResource.EMPTY);
+        }
+
+        @Override
+        public boolean isItemValid(int slot, ItemStack stack) {
+            return items.isValid(slot, ItemResource.of(stack));
+        }
+    }
+
     public enum SyncAction {
         NONE,
         BACKUP,
@@ -489,50 +578,53 @@ public class NullWorkbenchBlockEntity extends BlockEntity {
         }
     }
 
-    private final class AutomationItemHandler implements IItemHandlerModifiable {
+    /**
+     * Exposes a restricted view of {@link #items} for external automation: the four input slots are readable,
+     * writable and insertable, while the output slot is extractable only (matching the old {@code IItemHandler}
+     * gating this replaces).
+     */
+    private final class AutomationItemHandler implements ResourceHandler<ItemResource> {
         @Override
-        public int getSlots() {
+        public int size() {
             return INPUT_SLOT_COUNT + 1;
         }
 
         @Override
-        public ItemStack getStackInSlot(int slot) {
-            return slot >= 0 && slot < getSlots() ? items.getStackInSlot(slot) : ItemStack.EMPTY;
+        public ItemResource getResource(int index) {
+            return index >= 0 && index < size() ? items.getResource(index) : ItemResource.EMPTY;
         }
 
         @Override
-        public ItemStack insertItem(int slot, ItemStack stack, boolean simulate) {
-            if (slot < INPUT_SLOT_START || slot >= INPUT_SLOT_START + INPUT_SLOT_COUNT) {
-                return stack;
+        public long getAmountAsLong(int index) {
+            return index >= 0 && index < size() ? items.getAmountAsLong(index) : 0L;
+        }
+
+        @Override
+        public long getCapacityAsLong(int index, ItemResource resource) {
+            return index >= 0 && index <= OUTPUT_SLOT ? items.getCapacityAsLong(index, resource) : 0L;
+        }
+
+        @Override
+        public boolean isValid(int index, ItemResource resource) {
+            return index >= INPUT_SLOT_START
+                    && index < INPUT_SLOT_START + INPUT_SLOT_COUNT
+                    && items.isValid(index, resource);
+        }
+
+        @Override
+        public int insert(int index, ItemResource resource, int amount, TransactionContext transaction) {
+            if (index < INPUT_SLOT_START || index >= INPUT_SLOT_START + INPUT_SLOT_COUNT) {
+                return 0;
             }
-            return items.insertItem(slot, stack, simulate);
+            return items.insert(index, resource, amount, transaction);
         }
 
         @Override
-        public ItemStack extractItem(int slot, int amount, boolean simulate) {
-            if (slot < INPUT_SLOT_START || slot > OUTPUT_SLOT) {
-                return ItemStack.EMPTY;
+        public int extract(int index, ItemResource resource, int amount, TransactionContext transaction) {
+            if (index < INPUT_SLOT_START || index > OUTPUT_SLOT) {
+                return 0;
             }
-            return items.extractItem(slot, amount, simulate);
-        }
-
-        @Override
-        public int getSlotLimit(int slot) {
-            return slot >= 0 && slot <= OUTPUT_SLOT ? items.getSlotLimit(slot) : 0;
-        }
-
-        @Override
-        public boolean isItemValid(int slot, ItemStack stack) {
-            return slot >= INPUT_SLOT_START
-                    && slot < INPUT_SLOT_START + INPUT_SLOT_COUNT
-                    && items.isItemValid(slot, stack);
-        }
-
-        @Override
-        public void setStackInSlot(int slot, ItemStack stack) {
-            if (slot >= 0 && slot <= OUTPUT_SLOT) {
-                items.setStackInSlot(slot, stack);
-            }
+            return items.extract(index, resource, amount, transaction);
         }
     }
 }

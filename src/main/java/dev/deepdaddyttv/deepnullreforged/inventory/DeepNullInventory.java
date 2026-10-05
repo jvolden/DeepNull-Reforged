@@ -3115,8 +3115,8 @@ public class DeepNullInventory extends ItemStackHandler {
             invalidateEnderLink(enderUpgrade, clearInvalidLink);
             return null;
         }
-        if (!server.isSameThread()) {
-            // Client-side render reconstruction on an integrated server must never load chunks.
+        if (!server.isSameThread() || !level.isLoaded(link.pos())) {
+            // Off-thread lookups must never load chunks, and an unloaded dock chunk is not proof the dock is gone.
             return null;
         }
         if (!(level.getBlockEntity(link.pos()) instanceof DeepNullDockBlockEntity dock) || !dock.hasStoredDeepNull()) {

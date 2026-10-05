@@ -11,6 +11,7 @@ import net.neoforged.neoforge.transfer.energy.EnergyHandler;
 import net.neoforged.neoforge.transfer.fluid.FluidResource;
 import net.neoforged.neoforge.transfer.item.ItemResource;
 import net.neoforged.neoforge.transfer.transaction.SnapshotJournal;
+import net.neoforged.neoforge.transfer.transaction.Transaction;
 import net.neoforged.neoforge.transfer.transaction.TransactionContext;
 import org.jetbrains.annotations.Nullable;
 
@@ -20,6 +21,47 @@ import java.util.function.Supplier;
 
 public final class TransferCapabilityAdapters {
     private TransferCapabilityAdapters() {
+    }
+
+    /**
+     * Old-API-shaped {@code insertItem(slot, stack, simulate)} built on top of a new-API handler's
+     * {@link ResourceHandler#insert}, for callers (menu slots, JEI, gametests) not yet migrated off {@code IItemHandler}.
+     */
+    public static ItemStack insertItemViaHandler(ResourceHandler<ItemResource> handler, int slot, ItemStack stack, boolean simulate) {
+        if (stack.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        ItemResource resource = ItemResource.of(stack);
+        int inserted;
+        try (Transaction transaction = Transaction.openRoot()) {
+            inserted = handler.insert(slot, resource, stack.getCount(), transaction);
+            if (!simulate) {
+                transaction.commit();
+            }
+        }
+        return inserted >= stack.getCount() ? ItemStack.EMPTY : stack.copyWithCount(stack.getCount() - inserted);
+    }
+
+    /**
+     * Old-API-shaped {@code extractItem(slot, amount, simulate)} built on top of a new-API handler's
+     * {@link ResourceHandler#extract}, for callers not yet migrated off {@code IItemHandler}.
+     */
+    public static ItemStack extractItemViaHandler(ResourceHandler<ItemResource> handler, int slot, int amount, boolean simulate) {
+        if (amount <= 0) {
+            return ItemStack.EMPTY;
+        }
+        ItemResource resource = handler.getResource(slot);
+        if (resource.isEmpty()) {
+            return ItemStack.EMPTY;
+        }
+        int extracted;
+        try (Transaction transaction = Transaction.openRoot()) {
+            extracted = handler.extract(slot, resource, amount, transaction);
+            if (!simulate) {
+                transaction.commit();
+            }
+        }
+        return extracted <= 0 ? ItemStack.EMPTY : resource.toStack(extracted);
     }
 
     public static ResourceHandler<ItemResource> item(IItemHandlerModifiable handler) {
