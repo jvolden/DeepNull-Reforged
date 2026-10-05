@@ -6,6 +6,7 @@ import dev.deepdaddyttv.deepnullreforged.block.entity.DeepNullDockBlockEntity;
 import dev.deepdaddyttv.deepnullreforged.capability.LegacyCapabilityBridge;
 import dev.deepdaddyttv.deepnullreforged.capability.DeepNullFluidHandler;
 import dev.deepdaddyttv.deepnullreforged.event.CommonEvents;
+import dev.deepdaddyttv.deepnullreforged.inventory.DeepNullFilterMode;
 import dev.deepdaddyttv.deepnullreforged.inventory.DeepNullInventory;
 import dev.deepdaddyttv.deepnullreforged.inventory.DeepNullTier;
 import dev.deepdaddyttv.deepnullreforged.inventory.DeepNullUpgradeType;
@@ -15,6 +16,8 @@ import dev.deepdaddyttv.deepnullreforged.inventory.StoneworksMaterial;
 import dev.deepdaddyttv.deepnullreforged.inventory.StyleGlassVariant;
 import dev.deepdaddyttv.deepnullreforged.inventory.TransferDirectionMode;
 import dev.deepdaddyttv.deepnullreforged.inventory.TransferOutputMode;
+import dev.deepdaddyttv.deepnullreforged.item.DeepNullItem;
+import dev.deepdaddyttv.deepnullreforged.item.EnderUpgradeItem;
 import dev.deepdaddyttv.deepnullreforged.item.SynchronizerItem;
 import dev.deepdaddyttv.deepnullreforged.menu.DeepNullMenu;
 import dev.deepdaddyttv.deepnullreforged.player.DeepNullPlayerState;
@@ -22,18 +25,27 @@ import dev.deepdaddyttv.deepnullreforged.registry.ModBlocks;
 import dev.deepdaddyttv.deepnullreforged.registry.ModCapabilities;
 import dev.deepdaddyttv.deepnullreforged.registry.ModItems;
 import net.minecraft.core.BlockPos;
+import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.Direction;
 import net.minecraft.gametest.framework.GameTestHelper;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.util.TriState;
 import net.minecraft.util.ProblemReporter;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.EquipmentSlot;
+import net.minecraft.world.entity.EntityType;
 import net.minecraft.world.entity.item.ItemEntity;
+import net.minecraft.world.inventory.ContainerInput;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.component.CustomData;
+import net.minecraft.world.item.context.UseOnContext;
 import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.material.Fluids;
@@ -49,8 +61,11 @@ import net.neoforged.neoforge.transfer.ResourceHandler;
 import net.neoforged.neoforge.transfer.fluid.FluidResource;
 import net.neoforged.neoforge.transfer.item.ItemResource;
 import net.neoforged.neoforge.transfer.transaction.Transaction;
+import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.Vec3;
 
 import java.lang.reflect.Method;
+import java.util.List;
 
 public final class DeepNullRegressionGameTests {
     private DeepNullRegressionGameTests() {
@@ -310,6 +325,261 @@ public final class DeepNullRegressionGameTests {
         helper.succeed();
     }
 
+    public static void empty_whitelist_rejects_items_while_empty_blacklist_allows_them(GameTestHelper helper) {
+        DeepNullInventory inventory = DeepNullGameTestSupport.deepNullInventory(helper, DeepNullTier.IRON);
+        inventory.getUpgradeHandler().setStackInSlot(
+                DeepNullUpgradeType.FILTER.slot(),
+                DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.FILTER)
+        );
+
+        helper.assertFalse(inventory.isItemValid(0, new ItemStack(Items.COBBLESTONE)), "An empty whitelist should reject incoming items");
+        inventory.setFilterMode(DeepNullFilterMode.BLACKLIST);
+        helper.assertTrue(inventory.isItemValid(0, new ItemStack(Items.COBBLESTONE)), "An empty blacklist should allow incoming items");
+        helper.succeed();
+    }
+
+    public static void ender_linked_dampnull_render_preview_uses_mirrored_fluid(GameTestHelper helper) {
+        BlockPos relativeDockPos = new BlockPos(1, 1, 1);
+        BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
+        helper.setBlock(relativeDockPos, ModBlocks.DEEP_NULL_DOCK.get());
+        if (!(helper.getLevel().getBlockEntity(absoluteDockPos) instanceof DeepNullDockBlockEntity dock)) {
+            helper.fail("Expected DeepNull Dock block entity at " + relativeDockPos);
+            return;
+        }
+
+        dock.setStoredDeepNull(DeepNullGameTestSupport.dampNullStack(DeepNullTier.REDSTONE));
+        DeepNullInventory dockInventory = dock.createInventory();
+        if (dockInventory == null) {
+            helper.fail("Docked DampNull inventory was not created");
+            return;
+        }
+        dockInventory.fillFluid(new FluidStack(Fluids.WATER, FluidType.BUCKET_VOLUME), false);
+
+        ItemStack heldDampNull = DeepNullGameTestSupport.dampNullStack(DeepNullTier.REDSTONE);
+        DeepNullInventory heldInventory = new DeepNullInventory(DeepNullTier.REDSTONE, heldDampNull, helper.getLevel().registryAccess(), null);
+        heldInventory.fillFluid(new FluidStack(Fluids.WATER, FluidType.BUCKET_VOLUME), false);
+        ItemStack enderUpgrade = DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.ENDER);
+        EnderUpgradeItem.setLink(enderUpgrade, helper.getLevel().dimension(), absoluteDockPos, true, DeepNullTier.REDSTONE);
+        heldInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.ENDER.slot(), enderUpgrade);
+
+        DeepNullInventory changedDockInventory = dock.createInventory();
+        if (changedDockInventory == null) {
+            helper.fail("Docked DampNull inventory was not recreated");
+            return;
+        }
+        changedDockInventory.clearFluidSlot(0);
+        changedDockInventory.fillFluid(new FluidStack(Fluids.LAVA, FluidType.BUCKET_VOLUME), false);
+
+        new DeepNullInventory(DeepNullTier.REDSTONE, heldDampNull, helper.getLevel().registryAccess(), null);
+        DeepNullInventory.SelectedRenderPreview preview = DeepNullInventory.peekSelectedForRender(heldDampNull, true);
+        helper.assertTrue(preview.fluidStack().getFluid() == Fluids.LAVA, "Linked DampNull preview should use the dock's mirrored fluid");
+        helper.assertValueEqual(preview.fluidStack().getAmount(), FluidType.BUCKET_VOLUME, "Linked DampNull preview should preserve the mirrored fluid amount");
+        helper.succeed();
+    }
+
+    public static void ender_only_inventory_tick_refreshes_linked_mirror(GameTestHelper helper) {
+        BlockPos relativeDockPos = new BlockPos(1, 1, 1);
+        BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
+        helper.setBlock(relativeDockPos, ModBlocks.DEEP_NULL_DOCK.get());
+        if (!(helper.getLevel().getBlockEntity(absoluteDockPos) instanceof DeepNullDockBlockEntity dock)) {
+            helper.fail("Expected DeepNull Dock block entity at " + relativeDockPos);
+            return;
+        }
+
+        dock.setStoredDeepNull(DeepNullGameTestSupport.deepNullStack(DeepNullTier.IRON));
+        DeepNullInventory dockInventory = dock.createInventory();
+        if (dockInventory == null) {
+            helper.fail("Docked DeepNull inventory was not created");
+            return;
+        }
+        dockInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 4));
+        dockInventory.setSelectedSlot(0);
+
+        ItemStack heldDeepNull = DeepNullGameTestSupport.deepNullStack(DeepNullTier.IRON);
+        DeepNullInventory heldInventory = new DeepNullInventory(DeepNullTier.IRON, heldDeepNull, helper.getLevel().registryAccess(), null);
+        heldInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 4));
+        heldInventory.setSelectedSlot(0);
+        ItemStack enderUpgrade = DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.ENDER);
+        EnderUpgradeItem.setLink(enderUpgrade, helper.getLevel().dimension(), absoluteDockPos, false, DeepNullTier.IRON);
+        heldInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.ENDER.slot(), enderUpgrade);
+
+        DeepNullInventory changedDockInventory = dock.createInventory();
+        if (changedDockInventory == null) {
+            helper.fail("Docked DeepNull inventory was not recreated");
+            return;
+        }
+        changedDockInventory.setStackInSlot(0, new ItemStack(Items.DIRT, 7));
+        changedDockInventory.setSelectedSlot(0);
+
+        DeepNullInventory.SelectedRenderPreview stalePreview = DeepNullInventory.peekSelectedForRender(heldDeepNull, false);
+        helper.assertTrue(stalePreview.itemStack().is(Items.COBBLESTONE), "Held mirror should remain stale until its scheduled inventory tick");
+
+        ServerPlayer player = DeepNullGameTestSupport.fakePlayer(helper);
+        int tickSlot = Math.floorMod((int) helper.getLevel().getGameTime(), 5);
+        player.getInventory().setItem(tickSlot, heldDeepNull);
+        ItemStack tickingStack = player.getInventory().getItem(tickSlot);
+        ((DeepNullItem) tickingStack.getItem()).inventoryTick(tickingStack, helper.getLevel(), player, EquipmentSlot.MAINHAND);
+
+        DeepNullInventory.SelectedRenderPreview refreshedPreview = DeepNullInventory.peekSelectedForRender(tickingStack, false);
+        helper.assertTrue(refreshedPreview.itemStack().is(Items.DIRT), "An Ender-only DeepNull should refresh its linked dock mirror during inventory tick");
+        helper.assertValueEqual(refreshedPreview.itemStack().getCount(), 7, "The refreshed mirror should preserve the docked stack count");
+        helper.succeed();
+    }
+
+    public static void ender_linked_placement_decrements_the_docked_inventory(GameTestHelper helper) {
+        BlockPos relativeDockPos = new BlockPos(1, 1, 1);
+        BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
+        helper.setBlock(relativeDockPos, ModBlocks.DEEP_NULL_DOCK.get());
+        if (!(helper.getLevel().getBlockEntity(absoluteDockPos) instanceof DeepNullDockBlockEntity dock)) {
+            helper.fail("Expected DeepNull Dock block entity at " + relativeDockPos);
+            return;
+        }
+
+        dock.setStoredDeepNull(DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE));
+        DeepNullInventory dockInventory = dock.createInventory();
+        if (dockInventory == null) {
+            helper.fail("Docked DeepNull inventory was not created");
+            return;
+        }
+        dockInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 4));
+        dockInventory.setSelectedSlot(0);
+
+        ItemStack heldDeepNull = DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE);
+        DeepNullInventory heldInventory = new DeepNullInventory(DeepNullTier.REDSTONE, heldDeepNull, helper.getLevel().registryAccess(), null);
+        heldInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 2));
+        heldInventory.setSelectedSlot(0);
+        ItemStack enderUpgrade = DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.ENDER);
+        EnderUpgradeItem.setLink(enderUpgrade, helper.getLevel().dimension(), absoluteDockPos, false, DeepNullTier.REDSTONE);
+        heldInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.ENDER.slot(), enderUpgrade);
+        helper.assertValueEqual(dock.createInventory().getStackInSlot(0).getCount(), 6, "Installing Ender Upgrade should merge the handheld items into the dock");
+
+        ServerPlayer player = DeepNullGameTestSupport.fakePlayer(helper);
+        player.getAbilities().instabuild = false;
+        player.setItemInHand(InteractionHand.MAIN_HAND, heldDeepNull);
+        BlockPos clickedPos = new BlockPos(3, 1, 1);
+        helper.setBlock(clickedPos, Blocks.STONE);
+        BlockPos absoluteClickedPos = helper.absolutePos(clickedPos);
+        BlockHitResult hit = new BlockHitResult(
+                Vec3.atBottomCenterOf(absoluteClickedPos.above()),
+                Direction.UP,
+                absoluteClickedPos,
+                false
+        );
+
+        ((DeepNullItem) heldDeepNull.getItem()).useOn(new UseOnContext(player, InteractionHand.MAIN_HAND, hit));
+
+        helper.assertBlockPresent(Blocks.COBBLESTONE, clickedPos.above());
+        helper.assertValueEqual(dock.createInventory().getStackInSlot(0).getCount(), 5, "Placing from a linked handheld DeepNull must decrement the docked inventory");
+        helper.succeed();
+    }
+
+    public static void linked_ender_install_merges_both_item_inventories(GameTestHelper helper) {
+        BlockPos relativeDockPos = new BlockPos(1, 1, 1);
+        BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
+        helper.setBlock(relativeDockPos, ModBlocks.DEEP_NULL_DOCK.get());
+        if (!(helper.getLevel().getBlockEntity(absoluteDockPos) instanceof DeepNullDockBlockEntity dock)) {
+            helper.fail("Expected DeepNull Dock block entity at " + relativeDockPos);
+            return;
+        }
+
+        dock.setStoredDeepNull(DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE));
+        DeepNullInventory dockInventory = dock.createInventory();
+        if (dockInventory == null) {
+            helper.fail("Docked DeepNull inventory was not created");
+            return;
+        }
+        dockInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 7));
+
+        ItemStack heldDeepNull = DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE);
+        DeepNullInventory heldInventory = new DeepNullInventory(DeepNullTier.REDSTONE, heldDeepNull, helper.getLevel().registryAccess(), null);
+        heldInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 5));
+        heldInventory.setStackInSlot(1, new ItemStack(Items.DIRT, 3));
+        ItemStack enderUpgrade = DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.ENDER);
+        EnderUpgradeItem.setLink(enderUpgrade, helper.getLevel().dimension(), absoluteDockPos, false, DeepNullTier.REDSTONE);
+        heldInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.ENDER.slot(), enderUpgrade);
+
+        DeepNullInventory mergedDock = dock.createInventory();
+        helper.assertValueEqual(DeepNullGameTestSupport.storedItemCount(mergedDock, Items.COBBLESTONE), 12, "Ender install should combine matching item counts");
+        helper.assertValueEqual(DeepNullGameTestSupport.storedItemCount(mergedDock, Items.DIRT), 3, "Ender install should preserve distinct handheld items");
+        DeepNullInventory mirroredHeld = new DeepNullInventory(DeepNullTier.REDSTONE, heldDeepNull, helper.getLevel().registryAccess(), null);
+        helper.assertValueEqual(DeepNullGameTestSupport.storedItemCount(mirroredHeld, Items.COBBLESTONE), 12, "Handheld mirror should immediately reflect the merged dock");
+        helper.assertValueEqual(DeepNullGameTestSupport.storedItemCount(mirroredHeld, Items.DIRT), 3, "Handheld mirror should include all merged item types");
+        helper.succeed();
+    }
+
+    public static void linked_ender_install_drops_consolidated_overflow_at_the_dock(GameTestHelper helper) {
+        BlockPos relativeDockPos = new BlockPos(1, 1, 1);
+        BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
+        helper.setBlock(relativeDockPos, ModBlocks.DEEP_NULL_DOCK.get());
+        if (!(helper.getLevel().getBlockEntity(absoluteDockPos) instanceof DeepNullDockBlockEntity dock)) {
+            helper.fail("Expected DeepNull Dock block entity at " + relativeDockPos);
+            return;
+        }
+
+        dock.setStoredDeepNull(DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE));
+        DeepNullInventory dockInventory = dock.createInventory();
+        if (dockInventory == null) {
+            helper.fail("Docked DeepNull inventory was not created");
+            return;
+        }
+        ItemStack[] fullInventory = {
+                new ItemStack(Items.COBBLESTONE, DeepNullTier.REDSTONE.perSlotCapacity()),
+                new ItemStack(Items.DIRT, 1),
+                new ItemStack(Items.STONE, 1),
+                new ItemStack(Items.SAND, 1),
+                new ItemStack(Items.GRAVEL, 1),
+                new ItemStack(Items.ANDESITE, 1),
+                new ItemStack(Items.DIORITE, 1),
+                new ItemStack(Items.GRANITE, 1),
+                new ItemStack(Items.NETHERRACK, 1)
+        };
+        for (int slot = 0; slot < fullInventory.length; slot++) {
+            dockInventory.setStackInSlot(slot, fullInventory[slot]);
+        }
+
+        ItemStack heldDeepNull = DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE);
+        DeepNullInventory heldInventory = new DeepNullInventory(DeepNullTier.REDSTONE, heldDeepNull, helper.getLevel().registryAccess(), null);
+        heldInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 20));
+        ItemStack enderUpgrade = DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.ENDER);
+        EnderUpgradeItem.setLink(enderUpgrade, helper.getLevel().dimension(), absoluteDockPos, false, DeepNullTier.REDSTONE);
+        heldInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.ENDER.slot(), enderUpgrade);
+
+        List<ItemEntity> drops = helper.getEntities(EntityType.ITEM, relativeDockPos.above(), 2.0D);
+        helper.assertValueEqual(drops.size(), 1, "Ender overflow should be emitted as one item entity");
+        helper.assertTrue(drops.getFirst().getItem().is(Items.COBBLESTONE), "Ender overflow should preserve the item type");
+        helper.assertValueEqual(drops.getFirst().getItem().getCount(), 20, "Ender overflow should preserve the full count in one stack");
+        helper.assertValueEqual(dock.createInventory().getStackInSlot(0).getCount(), DeepNullTier.REDSTONE.perSlotCapacity(), "Overflow should not overfill the dock");
+        helper.succeed();
+    }
+
+    public static void malformed_render_storage_returns_an_empty_preview(GameTestHelper helper) {
+        ItemStack dampNull = DeepNullGameTestSupport.dampNullStack(DeepNullTier.REDSTONE);
+        CustomData.update(DataComponents.CUSTOM_DATA, dampNull, tag -> {
+            CompoundTag root = new CompoundTag();
+            root.putInt("Selected", 0);
+
+            CompoundTag malformedFluid = new CompoundTag();
+            malformedFluid.putInt("Slot", 0);
+            malformedFluid.putString("Stack", "not-a-fluid-stack");
+            ListTag fluids = new ListTag();
+            fluids.add(malformedFluid);
+            root.put("Fluids", fluids);
+
+            CompoundTag malformedChemical = new CompoundTag();
+            malformedChemical.putInt("Slot", 0);
+            malformedChemical.putString("Stack", "not-a-chemical-stack");
+            ListTag chemicals = new ListTag();
+            chemicals.add(malformedChemical);
+            root.put("Chemicals", chemicals);
+            tag.put("DeepNull", root);
+        });
+
+        DeepNullInventory.SelectedRenderPreview preview = DeepNullInventory.peekSelectedForRender(dampNull, true);
+        helper.assertTrue(preview.fluidStack().isEmpty(), "Malformed fluid render data should produce an empty preview");
+        helper.assertTrue(preview.chemicalStack().isEmpty(), "Malformed chemical render data should produce an empty preview");
+        helper.succeed();
+    }
+
     public static void dampnull_gas_upgrade_rejects_normal_fluid_insertion(GameTestHelper helper) {
         DeepNullInventory inventory = DeepNullGameTestSupport.dampNullInventory(helper, DeepNullTier.REDSTONE);
         inventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.GAS.slot(), DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.GAS));
@@ -452,6 +722,43 @@ public final class DeepNullRegressionGameTests {
         helper.succeed();
     }
 
+    public static void dock_empty_hand_crouch_click_toggles_empty_dock(GameTestHelper helper) {
+        assertDockEmptyHandToggle(helper, false);
+    }
+
+    public static void dock_empty_hand_crouch_click_preserves_docked_null(GameTestHelper helper) {
+        assertDockEmptyHandToggle(helper, true);
+    }
+
+    private static void assertDockEmptyHandToggle(GameTestHelper helper, boolean filled) {
+        BlockPos relativePos = new BlockPos(1, 1, 1);
+        helper.setBlock(relativePos, ModBlocks.DEEP_NULL_DOCK.get());
+        BlockPos pos = helper.absolutePos(relativePos);
+        DeepNullDockBlockEntity dock = (DeepNullDockBlockEntity) helper.getLevel().getBlockEntity(pos);
+        ItemStack stored = filled ? DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE) : ItemStack.EMPTY;
+        if (filled) {
+            dock.setStoredDeepNull(stored.copy());
+        }
+        ServerPlayer player = DeepNullGameTestSupport.fakePlayer(helper);
+        player.setItemInHand(InteractionHand.MAIN_HAND, ItemStack.EMPTY);
+        player.setItemInHand(InteractionHand.OFF_HAND, ItemStack.EMPTY);
+        player.setShiftKeyDown(true);
+        BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
+        try {
+            helper.assertFalse(dock.isAutoExportEnabled(), "Auto-Export must start off");
+            helper.assertTrue(player.gameMode.useItemOn(player, helper.getLevel(), ItemStack.EMPTY,
+                    InteractionHand.MAIN_HAND, hit).consumesAction(), "Empty-hand toggle must consume the actual block interaction");
+            helper.assertTrue(dock.isAutoExportEnabled(), "First crouch click must enable Auto-Export");
+            player.gameMode.useItemOn(player, helper.getLevel(), ItemStack.EMPTY, InteractionHand.MAIN_HAND, hit);
+            helper.assertFalse(dock.isAutoExportEnabled(), "Second crouch click must disable Auto-Export");
+            helper.assertValueEqual(dock.hasStoredDeepNull(), filled, "Toggle must not eject the docked Null");
+            helper.assertTrue(player.getInventory().isEmpty(), "Toggle must not move the docked Null to the player");
+        } finally {
+            player.setShiftKeyDown(false);
+        }
+        helper.succeed();
+    }
+
     public static void dock_automation_extracts_default_keep_one_fully_but_respects_explicit_keep_amounts(GameTestHelper helper) {
         BlockPos relativeDockPos = new BlockPos(1, 1, 1);
         BlockPos absoluteDockPos = helper.absolutePos(relativeDockPos);
@@ -470,6 +777,9 @@ public final class DeepNullRegressionGameTests {
         defaultInventory.setStackInSlot(0, new ItemStack(Items.COBBLESTONE, 20));
 
         IItemHandler dockHandler = dock.getAutomationHandler(null);
+        helper.assertTrue(dockHandler.extractItem(0, 64, false).isEmpty(), "Dock automation should not export while Auto-Export is off by default");
+        helper.assertValueEqual(dock.createInventory().getStackInSlot(0).getCount(), 20, "Disabled Auto-Export should leave stored items untouched");
+        dock.setAutoExportEnabled(true);
         ItemStack fullyExtracted = dockHandler.extractItem(0, 64, false);
         helper.assertValueEqual(fullyExtracted.getCount(), 20, "Dock automation should fully extract a default Keep 1 slot");
         helper.assertTrue(dock.createInventory().getStackInSlot(0).isEmpty(), "Dock automation should leave the slot empty after full extraction from a default Keep 1 slot");
@@ -504,6 +814,7 @@ public final class DeepNullRegressionGameTests {
             return;
         }
         inventory.fillFluid(new FluidStack(Fluids.WATER, FluidType.BUCKET_VOLUME * 2), false);
+        dock.setAutoExportEnabled(true);
 
         ResourceHandler<FluidResource> northHandler = helper.getLevel().getCapability(Capabilities.Fluid.BLOCK, absoluteDockPos, Direction.NORTH);
         ResourceHandler<FluidResource> southHandler = helper.getLevel().getCapability(Capabilities.Fluid.BLOCK, absoluteDockPos, Direction.SOUTH);
@@ -538,7 +849,7 @@ public final class DeepNullRegressionGameTests {
             return;
         }
         inventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.STONE_GENERATOR.slot(), DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.STONE_GENERATOR));
-        dock.restoreState(new DeepNullDockBlockEntity.DockState(dock.getStoredDeepNull().copy(), new ItemStack(Items.COBBLESTONE, 20)));
+        dock.restoreState(new DeepNullDockBlockEntity.DockState(dock.getStoredDeepNull().copy(), new ItemStack(Items.COBBLESTONE, 20), true));
 
         ResourceHandler<ItemResource> northTransfer = helper.getLevel().getCapability(Capabilities.Item.BLOCK, absoluteDockPos, Direction.NORTH);
         ResourceHandler<ItemResource> southTransfer = helper.getLevel().getCapability(Capabilities.Item.BLOCK, absoluteDockPos, Direction.SOUTH);
@@ -622,6 +933,132 @@ public final class DeepNullRegressionGameTests {
 
         SynchronizerItem.clearConfiguration(synchronizer);
         helper.assertFalse(SynchronizerItem.hasConfiguration(synchronizer), "Synchronizer should clear stored configuration");
+        helper.succeed();
+    }
+
+    public static void direct_cursor_storage_uses_tier_capacity_and_conserves_the_cursor(GameTestHelper helper) {
+        ServerPlayer player = DeepNullGameTestSupport.fakePlayer(helper);
+        ItemStack nullStack = DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE);
+        player.getInventory().setItem(0, nullStack);
+        DeepNullMenu menu = DeepNullMenu.forItem(31, player.getInventory(), 0, DeepNullTier.REDSTONE, DeepNullMenu.ViewMode.MAIN);
+        int capacity = menu.getDankInventory().getSlotLimit(0);
+
+        menu.getDankInventory().setStackInSlot(0, new ItemStack(Items.COBBLESTONE, capacity - 2));
+        menu.setCarried(new ItemStack(Items.COBBLESTONE, 10));
+        menu.clicked(0, 0, ContainerInput.PICKUP, player);
+        helper.assertValueEqual(menu.getDankInventory().getStackInSlot(0).getCount(), capacity, "Left-click should fill to the actual tier capacity");
+        helper.assertValueEqual(menu.getCarried().getCount(), 8, "Left-click should conserve cursor overflow");
+
+        menu.setCarried(new ItemStack(Items.DIRT, 10));
+        menu.clicked(1, 1, ContainerInput.PICKUP, player);
+        helper.assertValueEqual(menu.getDankInventory().getStackInSlot(1).getCount(), 1, "Right-click should insert one item");
+        helper.assertValueEqual(menu.getCarried().getCount(), 9, "Right-click should remove exactly one cursor item");
+
+        ItemStack unsupported = new ItemStack(Items.DIAMOND, 3);
+        DeepNullMenu upgradeMenu = DeepNullMenu.forItem(33, player.getInventory(), 0, DeepNullTier.REDSTONE, DeepNullMenu.ViewMode.UPGRADES);
+        upgradeMenu.setCarried(unsupported.copy());
+        upgradeMenu.clicked(0, 0, ContainerInput.PICKUP, player);
+        helper.assertTrue(ItemStack.matches(upgradeMenu.getCarried(), unsupported), "Upgrade interactions must not use direct storage insertion");
+        helper.succeed();
+    }
+
+    public static void item_merge_sort_selection_metadata_and_extraction_undo_are_stable(GameTestHelper helper) {
+        DeepNullInventory inventory = DeepNullGameTestSupport.deepNullInventory(helper, DeepNullTier.REDSTONE);
+        int capacity = inventory.getSlotLimit(0);
+        ItemStack namedCobble = new ItemStack(Items.COBBLESTONE, 20);
+        namedCobble.set(DataComponents.CUSTOM_NAME, Component.literal("Stable source"));
+        ItemStack matchingCobble = namedCobble.copyWithCount(capacity - 5);
+        inventory.setStackInSlot(2, namedCobble);
+        inventory.setStackInSlot(5, matchingCobble);
+        inventory.setSelectedSlot(2);
+        inventory.setExtractionSetting(2, ItemExtractionMode.CUSTOM, 7);
+
+        helper.assertTrue(inventory.mergeSlot(2, 5), "Matching item and component stacks should merge partially");
+        helper.assertValueEqual(inventory.getStackInSlot(2).getCount(), 15, "Partial merge source remainder");
+        helper.assertValueEqual(inventory.getStackInSlot(5).getCount(), capacity, "Partial merge destination capacity");
+        helper.assertValueEqual(inventory.getSelectedSlot(), 5, "Source selection should follow a merge to its destination");
+
+        ItemStack mismatched = new ItemStack(Items.COBBLESTONE, 1);
+        mismatched.set(DataComponents.CUSTOM_NAME, Component.literal("Different components"));
+        inventory.setStackInSlot(8, mismatched);
+        helper.assertFalse(inventory.mergeSlot(8, 5), "Different components must not merge");
+
+        inventory.setSelectedSlot(2);
+        helper.assertTrue(inventory.compactItemSlots(), "DeepNull Sorting should pack occupied entries into gaps");
+        helper.assertValueEqual(inventory.getStackInSlot(0).getHoverName().getString(), "Stable source", "Sorting should preserve the first entry and its metadata");
+        helper.assertValueEqual(inventory.getExtractionMode(0), ItemExtractionMode.CUSTOM, "Sorting should move extraction metadata with its entry");
+        helper.assertValueEqual(inventory.getExtractionMinimum(0), 7, "Sorting should preserve custom extraction amounts");
+        helper.assertValueEqual(inventory.getSelectedSlot(), 0, "Selection should follow its sorted entry");
+
+        ServerPlayer player = DeepNullGameTestSupport.fakePlayer(helper);
+        ItemStack menuStack = DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE);
+        player.getInventory().setItem(0, menuStack);
+        DeepNullMenu menu = DeepNullMenu.forItem(32, player.getInventory(), 0, DeepNullTier.REDSTONE, DeepNullMenu.ViewMode.MAIN);
+        menu.getDankInventory().setStackInSlot(0, new ItemStack(Items.STONE, 8));
+        menu.getDankInventory().setStackInSlot(1, new ItemStack(Items.DIRT, 8));
+        menu.getDankInventory().setExtractionSetting(0, ItemExtractionMode.KEEP_1, 1);
+        menu.getDankInventory().setExtractionSetting(1, ItemExtractionMode.KEEP_16, 16);
+        helper.assertTrue(menu.beginExtractionEdit(40L, 0, true), "Apply All should begin with a complete occupied-entry snapshot");
+        helper.assertTrue(menu.setExtractionEdit(40L, ItemExtractionMode.CUSTOM, 37), "Apply All should update all snapshotted entries");
+        helper.assertValueEqual(menu.getDankInventory().getExtractionMinimum(1), 37, "Apply All custom amount");
+        helper.assertTrue(menu.undoExtractionEdit(40L), "Undo should restore the complete snapshot");
+        helper.assertValueEqual(menu.getDankInventory().getExtractionMode(0), ItemExtractionMode.KEEP_1, "Undo slot 0 mode");
+        helper.assertValueEqual(menu.getDankInventory().getExtractionMode(1), ItemExtractionMode.KEEP_16, "Undo slot 1 mode");
+        helper.assertTrue(menu.beginExtractionEdit(41L, 0, true), "A newer extraction edit should replace the completed session");
+        helper.assertFalse(menu.setExtractionEdit(40L, ItemExtractionMode.KEEP_ALL, 0), "A stale update must be rejected");
+        helper.assertTrue(menu.setExtractionEdit(41L, ItemExtractionMode.KEEP_ALL, 0), "A stale update must not cancel the active session");
+        helper.assertFalse(menu.undoExtractionEdit(40L), "A stale undo must be rejected");
+        helper.assertTrue(menu.undoExtractionEdit(41L), "A stale undo must not erase the active rollback snapshot");
+        helper.assertTrue(menu.invalidateExtractionEdit(41L), "Closing should invalidate the active extraction edit");
+        helper.assertFalse(menu.setExtractionEdit(41L, ItemExtractionMode.KEEP_ALL, 0), "Invalidated edits must reject stale updates");
+        helper.assertTrue(menu.beginExtractionEdit(42L, 0, true), "An edit should begin against the current handheld Null instance");
+        player.getInventory().setItem(0, DeepNullGameTestSupport.deepNullStack(DeepNullTier.REDSTONE));
+        helper.assertFalse(menu.setExtractionEdit(42L, ItemExtractionMode.KEEP_NONE, 0), "Replacing the source Null must invalidate its edit session");
+        helper.assertFalse(menu.undoExtractionEdit(42L), "An invalidated source must not retain a stale undo path");
+        helper.assertTrue(menu.acceptStorageActionNonce(1L), "First action nonce should be accepted");
+        helper.assertFalse(menu.acceptStorageActionNonce(1L), "Replayed action nonce should be rejected");
+        helper.succeed();
+    }
+
+    public static void dampnull_swap_merge_clear_and_type_boundaries_persist(GameTestHelper helper) {
+        DeepNullInventory fluidInventory = DeepNullGameTestSupport.dampNullInventory(helper, DeepNullTier.REDSTONE);
+        fluidInventory.fillFluid(0, new FluidStack(Fluids.WATER, 4_000), false);
+        fluidInventory.fillFluid(1, new FluidStack(Fluids.WATER, 2_000), false);
+        fluidInventory.setSelectedSlot(0);
+        helper.assertTrue(fluidInventory.mergeTankSlot(0, 1), "Matching fluids should merge");
+        helper.assertValueEqual(fluidInventory.getFluidInSlot(1).getAmount(), 6_000, "Merged fluid amount");
+        helper.assertValueEqual(fluidInventory.getSelectedSlot(), 1, "Fluid source selection should follow the merge");
+        helper.assertTrue(fluidInventory.moveTankSlot(1, 2), "Fluid tanks should swap with empty tanks");
+        helper.assertTrue(fluidInventory.getFluidInSlot(1).isEmpty(), "Swap should empty the old tank");
+        helper.assertValueEqual(fluidInventory.getFluidInSlot(2).getAmount(), 6_000, "Swap should preserve the fluid amount");
+
+        DeepNullInventory fluidReload = new DeepNullInventory(DeepNullTier.REDSTONE, fluidInventory.backingStack(), helper.getLevel().registryAccess(), null);
+        helper.assertValueEqual(fluidReload.getFluidInSlot(2).getAmount(), 6_000, "Fluid swap should survive save and reload");
+        helper.assertTrue(fluidReload.clearFluidSlot(2), "Destructive fluid clear should accept occupied tanks");
+        helper.assertTrue(fluidReload.getFluidInSlot(2).isEmpty(), "Destructive fluid clear should void contents");
+
+        DeepNullInventory chemicalInventory = DeepNullGameTestSupport.dampNullInventory(helper, DeepNullTier.REDSTONE);
+        chemicalInventory.getUpgradeHandler().setStackInSlot(DeepNullUpgradeType.GAS.slot(), DeepNullGameTestSupport.upgradeStack(DeepNullUpgradeType.GAS));
+        StoredChemical steam = new StoredChemical("mekanism:steam", 3_000L, "mekanism:chemical/steam", 0xFFBBDDEE, "chemical.mekanism.steam", true);
+        StoredChemical oxygen = new StoredChemical("mekanism:oxygen", 1_000L, "mekanism:chemical/oxygen", 0xFF88AACC, "chemical.mekanism.oxygen", true);
+        helper.assertTrue(steam.isSameChemical(steam.copyWithAmount(1L)), "Chemical identity comparisons must ignore amount");
+        helper.assertFalse(steam.isSameChemical(oxygen), "Chemical identity comparisons must reject cross-type conversion");
+        helper.assertValueEqual(steam.copyWithAmount(9L).tint(), 0xFFBBDDEE, "Chemical copies should preserve tint");
+        if (!net.neoforged.fml.ModList.get().isLoaded("mekanism")) {
+            helper.succeed();
+            return;
+        }
+        helper.assertTrue(chemicalInventory.setChemicalInSlot(0, steam), "Chemical storage should retain its identity and tint");
+        helper.assertTrue(chemicalInventory.setChemicalInSlot(1, steam.copyWithAmount(2_000L)), "Matching chemical target");
+        helper.assertTrue(chemicalInventory.mergeTankSlot(0, 1), "Matching chemicals should merge without conversion");
+        helper.assertValueEqual(chemicalInventory.getChemicalInSlot(1).amount(), 5_000L, "Merged chemical amount");
+        helper.assertValueEqual(chemicalInventory.getChemicalInSlot(1).tint(), 0xFFBBDDEE, "Chemical tint should survive merging");
+        helper.assertTrue(chemicalInventory.setChemicalInSlot(2, oxygen), "Different chemical target");
+        helper.assertFalse(chemicalInventory.mergeTankSlot(1, 2), "Different chemicals must not merge");
+
+        DeepNullInventory chemicalReload = new DeepNullInventory(DeepNullTier.REDSTONE, chemicalInventory.backingStack(), helper.getLevel().registryAccess(), null);
+        helper.assertValueEqual(chemicalReload.getChemicalInSlot(1).chemicalId(), "mekanism:steam", "Chemical identity should survive save and reload");
+        helper.assertValueEqual(chemicalReload.getChemicalInSlot(1).tint(), 0xFFBBDDEE, "Chemical tint should survive save and reload");
         helper.succeed();
     }
 

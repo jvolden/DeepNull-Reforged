@@ -28,6 +28,7 @@ import net.minecraft.world.item.crafting.RecipeType;
 import net.minecraft.world.item.crafting.SingleRecipeInput;
 import net.minecraft.world.item.crafting.SmeltingRecipe;
 import net.minecraft.core.NonNullList;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.component.CustomData;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.material.Fluid;
@@ -285,14 +286,32 @@ public class DeepNullInventory extends ItemStackHandler {
                 : DeepNullContentMode.byId(root.getIntOr(CONTENT_MODE_TAG, DeepNullContentMode.ITEMS.ordinal()));
 
         if (contentMode == DeepNullContentMode.FLUIDS) {
-            FluidStack fluid = peekFluidEntry(root.getListOrEmpty(FLUIDS_TAG), selectedSlot);
-            StoredChemical chemical = fluid.isEmpty() ? peekChemicalEntry(root.getListOrEmpty(CHEMICALS_TAG), selectedSlot) : StoredChemical.EMPTY;
+            boolean linked = isEnderMirrorLinked(root);
+            String fluidsKey = linked ? ENDER_MIRROR_FLUIDS_TAG : FLUIDS_TAG;
+            String chemicalsKey = linked ? ENDER_MIRROR_CHEMICALS_TAG : CHEMICALS_TAG;
+            FluidStack fluid = peekFluidEntry(root.getListOrEmpty(fluidsKey), selectedSlot);
+            StoredChemical chemical = fluid.isEmpty() ? peekChemicalEntry(root.getListOrEmpty(chemicalsKey), selectedSlot) : StoredChemical.EMPTY;
             return new SelectedRenderPreview(contentMode, selectedSlot, ItemStack.EMPTY, fluid, chemical);
         }
 
         String itemsKey = isEnderMirrorLinked(root) ? ENDER_MIRROR_ITEMS_TAG : ITEMS_TAG;
-        ItemStack itemStack = peekStoredItemEntry(root.getListOrEmpty(itemsKey), selectedSlot);
+        ItemStack itemStack = peekStoredItemEntry(peekItemsList(root, itemsKey), selectedSlot);
         return new SelectedRenderPreview(contentMode, selectedSlot, itemStack, FluidStack.EMPTY, StoredChemical.EMPTY);
+    }
+
+    /**
+     * Mirrors readPrimaryStorageFromRoot's fallback: items were historically stored as a compound
+     * wrapping a nested "Items" list before migrating to a plain top-level list. Peek callers need
+     * to recognize both, the same as a full load does, or pre-migration stacks read back empty.
+     */
+    private static Tag peekItemsList(CompoundTag root, String itemsKey) {
+        if (hasList(root, itemsKey)) {
+            return root.getListOrEmpty(itemsKey);
+        }
+        if (hasCompound(root, itemsKey)) {
+            return root.getCompoundOrEmpty(itemsKey).getListOrEmpty("Items");
+        }
+        return new ListTag();
     }
 
     private static boolean isEnderMirrorLinked(CompoundTag root) {
@@ -353,7 +372,11 @@ public class DeepNullInventory extends ItemStackHandler {
         for (int i = 0; i < listTag.size(); i++) {
             CompoundTag entry = listTag.getCompoundOrEmpty(i);
             if (entry.getIntOr(SLOT_TAG, -1) == slot) {
-                return readFluidValue(entry, STACK_TAG);
+                try {
+                    return readFluidValue(entry, STACK_TAG);
+                } catch (RuntimeException exception) {
+                    return FluidStack.EMPTY;
+                }
             }
         }
         return FluidStack.EMPTY;
@@ -366,7 +389,11 @@ public class DeepNullInventory extends ItemStackHandler {
         for (int i = 0; i < listTag.size(); i++) {
             CompoundTag entry = listTag.getCompoundOrEmpty(i);
             if (entry.getIntOr(SLOT_TAG, -1) == slot) {
-                return StoredChemical.load(entry.getCompoundOrEmpty(STACK_TAG));
+                try {
+                    return StoredChemical.load(entry.getCompoundOrEmpty(STACK_TAG));
+                } catch (RuntimeException exception) {
+                    return StoredChemical.EMPTY;
+                }
             }
         }
         return StoredChemical.EMPTY;
@@ -537,9 +564,36 @@ public class DeepNullInventory extends ItemStackHandler {
         return displayedFluid(fluidStacks.get(slot));
     }
 
+    public List<FluidStack> copyFluidStacks() {
+        List<FluidStack> copy = new ArrayList<>(fluidStacks.size());
+        for (FluidStack fluidStack : fluidStacks) {
+            copy.add(fluidStack.isEmpty() ? FluidStack.EMPTY : fluidStack.copy());
+        }
+        return List.copyOf(copy);
+    }
+
     public StoredChemical getChemicalInSlot(int slot) {
         validateSlotIndex(slot);
         return displayedChemical(chemicalStacks.get(slot));
+    }
+
+    public List<StoredChemical> copyChemicalStacks() {
+        List<StoredChemical> copy = new ArrayList<>(chemicalStacks.size());
+        for (StoredChemical chemicalStack : chemicalStacks) {
+            copy.add(chemicalStack.copy());
+        }
+        return List.copyOf(copy);
+    }
+
+    public void replaceFluidContents(List<FluidStack> fluids, List<StoredChemical> chemicals) {
+        int fluidCount = fluids == null ? 0 : fluids.size();
+        int chemicalCount = chemicals == null ? 0 : chemicals.size();
+        for (int slot = 0; slot < fluidStacks.size(); slot++) {
+            FluidStack fluidStack = slot < fluidCount ? fluids.get(slot) : FluidStack.EMPTY;
+            StoredChemical chemicalStack = slot < chemicalCount ? chemicals.get(slot) : StoredChemical.EMPTY;
+            fluidStacks.set(slot, fluidStack == null || fluidStack.isEmpty() ? FluidStack.EMPTY : fluidStack.copy());
+            chemicalStacks.set(slot, chemicalStack == null ? StoredChemical.EMPTY : chemicalStack.copy());
+        }
     }
 
     public boolean hasChemicalInSlot(int slot) {
@@ -848,6 +902,90 @@ public class DeepNullInventory extends ItemStackHandler {
         }
         fluidStacks.set(slot, FluidStack.EMPTY);
         chemicalStacks.set(slot, StoredChemical.EMPTY);
+        save();
+        return true;
+    }
+
+    public boolean moveTankSlot(int fromSlot, int toSlot) {
+        validateSlotIndex(fromSlot);
+        validateSlotIndex(toSlot);
+        if (!supportsFluidStorage() || fromSlot == toSlot) {
+            return false;
+        }
+
+        FluidStack fromFluid = fluidStacks.get(fromSlot);
+        FluidStack toFluid = fluidStacks.get(toSlot);
+        StoredChemical fromChemical = chemicalStacks.get(fromSlot);
+        StoredChemical toChemical = chemicalStacks.get(toSlot);
+        if (fromFluid.isEmpty() && toFluid.isEmpty() && fromChemical.isEmpty() && toChemical.isEmpty()) {
+            return false;
+        }
+
+        fluidStacks.set(fromSlot, toFluid);
+        fluidStacks.set(toSlot, fromFluid);
+        chemicalStacks.set(fromSlot, toChemical);
+        chemicalStacks.set(toSlot, fromChemical);
+
+        if (selectedSlot == fromSlot) {
+            selectedSlot = toSlot;
+        } else if (selectedSlot == toSlot) {
+            selectedSlot = fromSlot;
+        }
+
+        save();
+        return true;
+    }
+
+    public boolean mergeTankSlot(int fromSlot, int toSlot) {
+        validateSlotIndex(fromSlot);
+        validateSlotIndex(toSlot);
+        if (!supportsFluidStorage() || fromSlot == toSlot || getFluidCapacity() <= 0) {
+            return false;
+        }
+        int previousSelectedSlot = selectedSlot;
+
+        FluidStack fromFluid = fluidStacks.get(fromSlot);
+        FluidStack toFluid = fluidStacks.get(toSlot);
+        if (!fromFluid.isEmpty() || !toFluid.isEmpty()) {
+            if (fromFluid.isEmpty()
+                    || toFluid.isEmpty()
+                    || !chemicalStacks.get(fromSlot).isEmpty()
+                    || !chemicalStacks.get(toSlot).isEmpty()
+                    || !FluidStack.isSameFluidSameComponents(fromFluid, toFluid)) {
+                return false;
+            }
+            int room = Math.max(0, getFluidCapacity() - toFluid.getAmount());
+            int moved = Math.min(room, fromFluid.getAmount());
+            if (moved <= 0 && !tier.creative()) {
+                return false;
+            }
+            if (!tier.creative()) {
+                fromFluid.shrink(moved);
+                toFluid.grow(moved);
+                if (fromFluid.isEmpty()) {
+                    fluidStacks.set(fromSlot, FluidStack.EMPTY);
+                }
+            }
+            selectedSlot = mergeSelectionAfter(previousSelectedSlot, fromSlot, toSlot);
+            save();
+            return true;
+        }
+
+        StoredChemical fromChemical = chemicalStacks.get(fromSlot);
+        StoredChemical toChemical = chemicalStacks.get(toSlot);
+        if (fromChemical.isEmpty() || toChemical.isEmpty() || !fromChemical.isSameChemical(toChemical)) {
+            return false;
+        }
+        long room = Math.max(0L, (long) getFluidCapacity() - toChemical.amount());
+        long moved = Math.min(room, fromChemical.amount());
+        if (moved <= 0L && !tier.creative()) {
+            return false;
+        }
+        if (!tier.creative()) {
+            chemicalStacks.set(fromSlot, fromChemical.copyWithAmount(fromChemical.amount() - moved));
+            chemicalStacks.set(toSlot, toChemical.copyWithAmount(toChemical.amount() + moved));
+        }
+        selectedSlot = mergeSelectionAfter(previousSelectedSlot, fromSlot, toSlot);
         save();
         return true;
     }
@@ -1612,6 +1750,11 @@ public class DeepNullInventory extends ItemStackHandler {
                 : Math.max(0, extractionModes[slot].keptAmount());
     }
 
+    public int getCustomExtractionAmount(int slot) {
+        validateSlotIndex(slot);
+        return Math.max(0, customExtractionAmounts[slot]);
+    }
+
     public Component getExtractionTooltip(int slot) {
         validateSlotIndex(slot);
         return extractionModes[slot].tooltip(getExtractionMinimum(slot));
@@ -1630,6 +1773,21 @@ public class DeepNullInventory extends ItemStackHandler {
         if (setCustomExtractionMinimumInternal(slot, amount)) {
             save();
         }
+    }
+
+    public boolean setExtractionSetting(int slot, ItemExtractionMode mode, int customAmount) {
+        validateSlotIndex(slot);
+        ItemExtractionMode nextMode = mode == null ? ItemExtractionMode.KEEP_1 : mode;
+        int nextCustomAmount = nextMode == ItemExtractionMode.CUSTOM
+                ? Math.max(0, Math.min(getSlotLimit(slot), customAmount))
+                : 0;
+        if (extractionModes[slot] == nextMode && customExtractionAmounts[slot] == nextCustomAmount) {
+            return false;
+        }
+        extractionModes[slot] = nextMode;
+        customExtractionAmounts[slot] = nextCustomAmount;
+        save();
+        return true;
     }
 
     public boolean setCustomExtractionMinimumAllOccupied(int amount) {
@@ -1744,6 +1902,64 @@ public class DeepNullInventory extends ItemStackHandler {
 
         save();
         return true;
+    }
+
+    public boolean mergeSlot(int fromSlot, int toSlot) {
+        validateSlotIndex(fromSlot);
+        validateSlotIndex(toSlot);
+        if (fluidOnly || fromSlot == toSlot) {
+            return false;
+        }
+        int previousSelectedSlot = selectedSlot;
+        ItemStack fromStack = stacks.get(fromSlot);
+        ItemStack toStack = stacks.get(toSlot);
+        if (fromStack.isEmpty() || toStack.isEmpty() || !ItemStack.isSameItemSameComponents(fromStack, toStack)) {
+            return false;
+        }
+
+        int moved = Math.min(Math.max(0, getSlotLimit(toSlot) - toStack.getCount()), fromStack.getCount());
+        if (moved <= 0) {
+            return false;
+        }
+        toStack.grow(moved);
+        fromStack.shrink(moved);
+        if (fromStack.isEmpty()) {
+            stacks.set(fromSlot, ItemStack.EMPTY);
+        }
+        selectedSlot = mergeSelectionAfter(previousSelectedSlot, fromSlot, toSlot);
+        save();
+        return true;
+    }
+
+    public boolean compactItemSlots() {
+        if (fluidOnly) {
+            return false;
+        }
+        boolean changed = false;
+        for (int targetSlot = 0; targetSlot < getSlots(); targetSlot++) {
+            if (!stacks.get(targetSlot).isEmpty()) {
+                continue;
+            }
+            int sourceSlot = nextOccupiedItemSlot(targetSlot + 1);
+            if (sourceSlot < 0) {
+                break;
+            }
+            changed |= moveSlot(sourceSlot, targetSlot);
+        }
+        return changed;
+    }
+
+    private static int mergeSelectionAfter(int previousSelectedSlot, int fromSlot, int toSlot) {
+        return previousSelectedSlot == fromSlot ? toSlot : previousSelectedSlot;
+    }
+
+    private int nextOccupiedItemSlot(int startSlot) {
+        for (int slot = Math.max(0, startSlot); slot < getSlots(); slot++) {
+            if (!stacks.get(slot).isEmpty()) {
+                return slot;
+            }
+        }
+        return -1;
     }
 
     public int getExtractableAmount(int slot) {
@@ -2895,7 +3111,15 @@ public class DeepNullInventory extends ItemStackHandler {
         }
 
         Level level = server.getLevel(link.dimension());
-        if (level == null || !(level.getBlockEntity(link.pos()) instanceof DeepNullDockBlockEntity dock) || !dock.hasStoredDeepNull()) {
+        if (level == null) {
+            invalidateEnderLink(enderUpgrade, clearInvalidLink);
+            return null;
+        }
+        if (!server.isSameThread() || !level.isLoaded(link.pos())) {
+            // Off-thread lookups must never load chunks, and an unloaded dock chunk is not proof the dock is gone.
+            return null;
+        }
+        if (!(level.getBlockEntity(link.pos()) instanceof DeepNullDockBlockEntity dock) || !dock.hasStoredDeepNull()) {
             invalidateEnderLink(enderUpgrade, clearInvalidLink);
             return null;
         }
@@ -3852,6 +4076,8 @@ public class DeepNullInventory extends ItemStackHandler {
     }
 
     private final class UpgradeItemHandler extends ItemStackHandler {
+        private boolean mergeOnNextEnderChange;
+
         private UpgradeItemHandler() {
             super(DeepNullUpgradeType.values().length);
         }
@@ -3897,9 +4123,103 @@ public class DeepNullInventory extends ItemStackHandler {
         }
 
         @Override
+        public void setStackInSlot(int slot, ItemStack stack) {
+            boolean merge = shouldMergeLinkedEnder(slot, stack);
+            boolean previous = mergeOnNextEnderChange;
+            mergeOnNextEnderChange = previous || merge;
+            try {
+                super.setStackInSlot(slot, stack);
+            } finally {
+                mergeOnNextEnderChange = previous;
+            }
+        }
+
+        @Override
+        public ItemStack insertItem(int slot, ItemStack stack, boolean simulate) {
+            boolean merge = !simulate && shouldMergeLinkedEnder(slot, stack);
+            boolean previous = mergeOnNextEnderChange;
+            mergeOnNextEnderChange = previous || merge;
+            try {
+                return super.insertItem(slot, stack, simulate);
+            } finally {
+                mergeOnNextEnderChange = previous;
+            }
+        }
+
+        private boolean shouldMergeLinkedEnder(int slot, ItemStack stack) {
+            return slot == DeepNullUpgradeType.ENDER.slot()
+                    && getStackInSlot(slot).isEmpty()
+                    && stack.getItem() instanceof EnderUpgradeItem
+                    && EnderUpgradeItem.isLinked(stack);
+        }
+
+        @Override
         protected void onContentsChanged(int slot) {
             super.onContentsChanged(slot);
+            if (slot == DeepNullUpgradeType.ENDER.slot() && mergeOnNextEnderChange) {
+                mergeOnNextEnderChange = false;
+                mergeLinkedItemStorageOnEnderInstall();
+            }
             save();
+        }
+    }
+
+    private void mergeLinkedItemStorageOnEnderInstall() {
+        if (fluidOnly) {
+            return;
+        }
+
+        HolderLookup.Provider registries = registriesSupplier.get();
+        LinkedDockSource linkedSource = resolveLinkedDockSource(false);
+        if (registries == null || linkedSource == null) {
+            return;
+        }
+
+        DeepNullInventory target = linkedSource.dock().createInventory();
+        if (target == null || target.isFluidOnly()) {
+            return;
+        }
+
+        List<ItemStack> overflow = new ArrayList<>();
+        for (ItemStack sourceStack : stacks) {
+            ItemStack remaining = sourceStack.copy();
+            for (int slot = 0; slot < target.getSlots() && !remaining.isEmpty(); slot++) {
+                remaining = target.insertItem(slot, remaining, false);
+            }
+            if (!remaining.isEmpty()) {
+                mergeOverflowStack(overflow, remaining);
+            }
+        }
+
+        overlayLinkedStorage(registries, linkedSource.dock().getStoredDeepNull());
+        dropLinkedOverflow(linkedSource.dock(), overflow);
+    }
+
+    private static void mergeOverflowStack(List<ItemStack> overflow, ItemStack remainder) {
+        for (ItemStack existing : overflow) {
+            if (ItemStack.isSameItemSameComponents(existing, remainder)) {
+                existing.grow(remainder.getCount());
+                return;
+            }
+        }
+        overflow.add(remainder.copy());
+    }
+
+    private static void dropLinkedOverflow(DeepNullDockBlockEntity dock, List<ItemStack> overflow) {
+        Level level = dock.getLevel();
+        if (level == null || level.isClientSide()) {
+            return;
+        }
+        for (ItemStack stack : overflow) {
+            ItemEntity entity = new ItemEntity(
+                    level,
+                    dock.getBlockPos().getX() + 0.5D,
+                    dock.getBlockPos().getY() + 1.0D,
+                    dock.getBlockPos().getZ() + 0.5D,
+                    stack
+            );
+            entity.setDefaultPickUpDelay();
+            level.addFreshEntity(entity);
         }
     }
 
